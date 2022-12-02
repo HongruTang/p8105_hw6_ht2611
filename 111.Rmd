@@ -1,0 +1,156 @@
+---
+title: '131'
+author: "ht2611"
+date: "2022-12-02"
+output: github_document
+---
+## 2
+
+```{r}
+library(tidyverse)
+library(modelr)
+library(dbplyr)
+```
+# tidy the data
+
+```{r}
+homocide = read_csv("data/homicide-data.csv")
+tidydata=homocide%>%
+  mutate(city_state = str_c(city, ", ", state)) %>% 
+  filter(!city_state %in% c("Dallas, TX","Phoenix, AZ","Kansas City,MO","Tulsa, AL")) %>% 
+  filter(victim_race %in% c("White","Black")) %>%
+  filter(!victim_age=="Unknown",
+         !victim_sex=="Unknown")%>%
+  mutate(solved_state= as.numeric(disposition == "Closed by arrest"))%>%
+  mutate(victim_age = as.numeric(victim_age),
+         victim_sex = ifelse(victim_sex=="Male",1,0))
+```
+
+## fit regression
+
+```{r}
+fit_logistic = 
+  tidydata %>% 
+  filter(city_state=="Baltimore, MD") %>%
+  glm(solved_state ~ victim_age + victim_race + victim_sex, data = .,   family = binomial()) 
+```
+
+```{r}
+fit_logistic%>%
+  broom::tidy()%>%
+  mutate(lower_conf = confint(fit_logistic)[,1],
+         upper_conf = confint(fit_logistic)[,2])%>%
+  filter(term=='victim_sex') %>% 
+  select(estimate, lower_conf, upper_conf) %>% 
+  mutate(estimate = exp(estimate),
+         lower_conf = exp(lower_conf),
+         upper_conf = exp(upper_conf))
+```
+So keeping all other variables fixed, because estimates is smaller than 1, man has a lower chance to get a resloved case.
+
+# other city
+
+```{r}
+all_city = 
+  tidydata %>% 
+  select(city_state, victim_race:victim_sex, solved_state) %>% 
+  nest(data = victim_race:solved_state) %>% 
+  mutate(
+   fit = map(data, ~glm(solved_state ~ victim_age+victim_race+victim_sex, family= binomial(), data=.x)),
+   results = map(fit, broom::tidy),
+   conf_int = map(fit, ~confint(.x,"victim_sex"))
+  ) %>% 
+  select(city_state,results,conf_int) %>% 
+  unnest(results)%>%
+  unnest_wider(conf_int)%>%
+  filter(term=="victim_sex") %>% 
+  select(city_state,estimate,`2.5 %`,`97.5 %`) %>% 
+  mutate(
+    estimate=exp(estimate),
+    `2.5 %` =exp(`2.5 %`),
+    `97.5 %` = exp(`97.5 %`)
+    )
+all_city
+```
+
+# plot
+
+```{r}
+ggplot(all_city, aes(x=fct_reorder(city_state, estimate), y=estimate))+
+  geom_point()+
+  geom_errorbar(aes(ymin=`2.5 %`, ymax=`97.5 %`))+
+  labs(title = "homocide")+xlab("City")+
+  theme(axis.text.x = element_text(angle = 80, hjust = 1))
+```
+
+Most cities' estimate are smaller than 1. It means that in most cities, men have lower chance to get a resloved case. For those cities that even the upper bound is smaller than 1, there exists a gender differece when the police finish the case.
+
+## 3 
+
+```{r}
+birthweight = read_csv("data/birthweight.csv")
+```
+
+```{r}
+tidydata1 = 
+  birthweight %>% 
+  mutate(
+    frace = recode(frace, `1` = "White", `2` = "Black", `3` = "Asian", `4`= "Puerto Rican", `8` = "Other", `9` = "Unknown"),
+    mrace = recode(mrace, `1` = "White", `2` = "Black", `3` = "Asian", `4`= "Puerto Rican", `8` = "Other"),
+    babysex = recode(babysex, `1` = "Male", `2` = "Female")
+    )%>% 
+  filter(frace!="Unknown")
+```
+
+To begin with, we select all variables. Then, we use backward regression to select important variables.
+
+```{r}
+full_model <- lm(bwt ~., data = tidydata1)
+backward_model <- MASS::stepAIC(full_model, direction = "backward", trace = FALSE)
+summary(backward_model)
+```
+
+# plot
+
+```{r}
+tidydata1 %>% 
+  add_predictions(backward_model) %>% 
+  add_residuals(backward_model) %>% 
+  ggplot(aes(x = pred, y = resid)) + geom_point() + 
+  geom_smooth()+
+  xlab("fitted value")+ylab("residuals")
+```
+
+# comparsion
+
+```{r}
+cv_df =
+  crossv_mc(tidydata1, 100) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble))
+```
+
+```{r}
+cv_df = 
+  cv_df %>% 
+  mutate(
+    backward_model  = map(train, ~lm( bwt ~ babysex + bhead + blength +   delwt +fincome + gaweeks + mheight + mrace +parity + ppwt + smoken, data  = .x)),
+    main_effect_model  = map(train, ~lm(bwt ~ gaweeks + blength, data =   .x)),
+    interactive_model  = map(train, ~lm(bwt ~ bhead*blength*babysex, data = .x))) %>% 
+  mutate(
+    rmse_backward = map2_dbl(backward_model, test, ~rmse(model = .x, data = .y)),
+    rmse_main_effect  = map2_dbl(main_effect_model, test, ~rmse(model =   .x, data = .y)),
+    rmse_interactive = map2_dbl(interactive_model, test, ~rmse(model = .x, data = .y)))
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+```
+
+As we can see from the plot, the model selected by backward has the lowest rmse. Interactive model is better than main_effect model.
